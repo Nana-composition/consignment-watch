@@ -230,7 +230,7 @@ def check_new_arrivals(tracked_artists, consignments):
     already_have = set()
     for item in consignments:
         if item["gallery"] == "lougher" and item["source_url"]:
-            already_have.add(item["source_url"].lower().split("?")[0])
+            already_have.add(item["source_url"].lower().split("?")[0].rstrip("/"))
 
     arrivals = []
     arrivals += _lougher_arrivals(tracked_artists, already_have)
@@ -249,11 +249,21 @@ def _lougher_arrivals(tracked_artists, already_have):
         href = a.get("href", "")
         full_url = ("https://www.loughercontemporary.com" + href
                     if href.startswith("/") else href)
-        clean_url = full_url.lower().split("?")[0]
+        clean_url = full_url.lower().split("?")[0].rstrip("/")
         if clean_url in already_have:
             continue
         if clean_url in seen_urls:
             continue
+        # Check if this is a consignment sale page
+        product_soup = fetch_soup(full_url)
+        if product_soup:
+            page_text = product_soup.get_text()
+            if any(phrase in page_text for phrase in [
+                "Consignment sales",
+                "Collect works sold by our trusted network",
+                "What is a Consignment work"
+            ]):
+                continue
         for artist in tracked_artists:
             if artist in text:
                 seen_urls.add(clean_url)
