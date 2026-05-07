@@ -94,7 +94,7 @@ def load_consignments():
     ))
     wb = load_workbook(path, data_only=True)
     ws = wb.active
-    headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
+    headers = [str(c.value).strip() if c.value else "" for c in ws[2]]
 
     def col(row, name):
         try:
@@ -103,7 +103,7 @@ def load_consignments():
             return None
 
     items = []
-    for row in ws.iter_rows(min_row=2):
+    for row in ws.iter_rows(min_row=3):
         consigner_raw = col(row, "Consigner") or ""
         gallery_key = None
         for fragment, key in CONSIGNER_MAP.items():
