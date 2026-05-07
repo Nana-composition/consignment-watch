@@ -44,8 +44,6 @@ PRICE_COLUMN = {
     "fontaine":  None,
 }
 
-# Only these galleries are checked for sold/price changes right now.
-# Add more here once each gallery scraper is confirmed working.
 ACTIVE_GALLERIES = {"lougher"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -87,8 +85,11 @@ def load_tracked_artists():
             name = row.get("Artist", "").strip()
             if name:
                 artists.add(name.lower())
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"DEBUG: failed to load artists sheet: {e}")
+    print(f"DEBUG: loaded {len(artists)} tracked artists")
+    if artists:
+        print(f"DEBUG: sample artists: {list(artists)[:5]}")
     return artists
 
 
@@ -145,8 +146,7 @@ def scrape_lougher(url):
         if r.status_code == 404:
             return False, None
         if r.status_code != 200:
-            return None, None  # skip on other errors
-        # Try to get price from page
+            return None, None
         soup = BeautifulSoup(r.text, "lxml")
         for script in soup.find_all("script"):
             if not script.string:
@@ -160,6 +160,7 @@ def scrape_lougher(url):
         return True, None
     except Exception:
         return None, None
+
 
 def scrape_clifton(url):
     soup = fetch_soup(url)
@@ -241,6 +242,7 @@ def check_new_arrivals(tracked_artists, consignments):
     for item in consignments:
         if item["gallery"] == "lougher" and item["source_url"]:
             already_have.add(item["source_url"].lower().split("?")[0].rstrip("/"))
+    print(f"DEBUG: {len(already_have)} Lougher URLs already in inventory")
 
     arrivals = []
     arrivals += _lougher_arrivals(tracked_artists, already_have)
@@ -249,31 +251,51 @@ def check_new_arrivals(tracked_artists, consignments):
 
 def _lougher_arrivals(tracked_artists, already_have):
     found = []
-    url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary"
-    soup = fetch_soup(url)
-    if not soup:
-        return found
     seen_urls = set()
-    for a in soup.select("a.card__heading, a[href*='/products/']"):
-        text = a.get_text(strip=True).lower()
-        href = a.get("href", "")
-        full_url = ("https://www.loughercontemporary.com" + href
-                    if href.startswith("/") else href)
-        clean_url = full_url.lower().split("?")[0].rstrip("/")
-        if clean_url in already_have:
-            continue
-        if clean_url in seen_urls:
-            continue
-        for artist in tracked_artists:
-            if artist in text:
-                seen_urls.add(clean_url)
-                found.append({
-                    "artist":  artist.title(),
-                    "title":   a.get_text(strip=True),
-                    "gallery": "Lougher",
-                    "url":     full_url,
-                })
-                break
+    page = 1
+    total_products = 0
+    while True:
+        url = f"https://www.loughercontemporary.com/collections/all/products.json?limit=250&page={page}"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            data = r.json()
+        except Exception as e:
+            print(f"DEBUG: JSON API error on page {page}: {e}")
+            break
+        products = data.get("products", [])
+        if not products:
+            print(f"DEBUG: no products on page {page}, stopping")
+            break
+        vendors = set(p.get("vendor", "") for p in products)
+        print(f"DEBUG page {page}: {len(products)} products, vendors: {vendors}")
+        total_products += len(products)
+        for product in products:
+            vendor = product.get("vendor", "")
+            if vendor != "Lougher Contemporary":
+                continue
+            title = product.get("title", "")
+            handle = product.get("handle", "")
+            full_url = f"https://www.loughercontemporary.com/products/{handle}"
+            clean_url = full_url.lower().rstrip("/")
+            if clean_url in already_have:
+                continue
+            if clean_url in seen_urls:
+                continue
+            title_lower = title.lower()
+            for artist in tracked_artists:
+                if artist in title_lower:
+                    seen_urls.add(clean_url)
+                    found.append({
+                        "artist":  artist.title(),
+                        "title":   title,
+                        "gallery": "Lougher",
+                        "url":     full_url,
+                    })
+                    break
+        if len(products) < 250:
+            break
+        page += 1
+    print(f"DEBUG: total products fetched: {total_products}, new arrivals found: {len(found)}")
     return found
 
 
@@ -308,7 +330,6 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
             groups.setdefault(key, []).append(i)
         return groups
 
-    # Sold section grouped by consigner
     sold_groups = group_by_consigner(sold)
     rows_sold = ""
     for consigner, items in sorted(sold_groups.items()):
@@ -320,7 +341,6 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
             )
         rows_sold += "</ul></li>"
 
-    # Mismatches section grouped by consigner
     mismatch_groups = group_by_consigner(mismatches)
     rows_mismatch = ""
     for consigner, items in sorted(mismatch_groups.items()):
@@ -333,7 +353,6 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
             )
         rows_mismatch += "</ul></li>"
 
-    # Arrivals section grouped by gallery
     arrival_groups = {}
     for a in arrivals:
         arrival_groups.setdefault(a["gallery"], []).append(a)
