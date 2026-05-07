@@ -44,6 +44,10 @@ PRICE_COLUMN = {
     "fontaine":  None,
 }
 
+# Only these galleries are checked for sold/price changes right now.
+# Add more here once each gallery scraper is confirmed working.
+ACTIVE_GALLERIES = {"lougher"}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def extract_url(cell_value):
@@ -226,7 +230,6 @@ def scrape(item):
 # ── New arrivals ──────────────────────────────────────────────────────────────
 
 def check_new_arrivals(tracked_artists, consignments):
-    # Build a set of (artist_lower, url) pairs we already consign from Lougher
     already_have = set()
     for item in consignments:
         if item["gallery"] == "lougher" and item["source_url"]:
@@ -254,7 +257,6 @@ def _lougher_arrivals(tracked_artists, already_have):
             continue
         if clean_url in seen_urls:
             continue
-        # Check if this is a consignment sale page
         product_soup = fetch_soup(full_url)
         if product_soup:
             page_text = product_soup.get_text()
@@ -301,21 +303,48 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
     def link(url, text):
         return f'<a href="{url}">{text}</a>' if url else text
 
-    rows_sold = "".join(
-        f"<li>{i['artist']} &ldquo;{i['title']}&rdquo; at {i['consigner']} "
-        f"[{link(i['source_url'], 'gallery')} | {link(i['admin_link'], 'admin')}]</li>"
-        for i in sold
-    )
-    rows_mismatch = "".join(
-        f"<li>{i['artist']} &ldquo;{i['title']}&rdquo; at {i['consigner']}: "
-        f"our {i['our_price']} vs theirs {i['their_price']} "
-        f"[{link(i['source_url'], 'gallery')} | {link(i['admin_link'], 'admin')}]</li>"
-        for i in mismatches
-    )
-    rows_arrivals = "".join(
-        f"<li>{a['artist']} &mdash; {link(a['url'], a['title'])} at {a['gallery']}</li>"
-        for a in arrivals
-    )
+    def group_by_consigner(items):
+        groups = {}
+        for i in items:
+            key = i["consigner"]
+            groups.setdefault(key, []).append(i)
+        return groups
+
+    # Sold section grouped by consigner
+    sold_groups = group_by_consigner(sold)
+    rows_sold = ""
+    for consigner, items in sorted(sold_groups.items()):
+        rows_sold += f"<li><strong>{consigner}</strong><ul>"
+        for i in items:
+            rows_sold += (
+                f"<li>{i['artist']} &ldquo;{i['title']}&rdquo; "
+                f"[{link(i['source_url'], 'gallery')} | {link(i['admin_link'], 'admin')}]</li>"
+            )
+        rows_sold += "</ul></li>"
+
+    # Mismatches section grouped by consigner
+    mismatch_groups = group_by_consigner(mismatches)
+    rows_mismatch = ""
+    for consigner, items in sorted(mismatch_groups.items()):
+        rows_mismatch += f"<li><strong>{consigner}</strong><ul>"
+        for i in items:
+            rows_mismatch += (
+                f"<li>{i['artist']} &ldquo;{i['title']}&rdquo;: "
+                f"our {i['our_price']} vs theirs {i['their_price']} "
+                f"[{link(i['source_url'], 'gallery')} | {link(i['admin_link'], 'admin')}]</li>"
+            )
+        rows_mismatch += "</ul></li>"
+
+    # Arrivals section grouped by gallery
+    arrival_groups = {}
+    for a in arrivals:
+        arrival_groups.setdefault(a["gallery"], []).append(a)
+    rows_arrivals = ""
+    for gallery, items in sorted(arrival_groups.items()):
+        rows_arrivals += f"<li><strong>{gallery}</strong><ul>"
+        for a in items:
+            rows_arrivals += f"<li>{a['artist']} &mdash; {link(a['url'], a['title'])}</li>"
+        rows_arrivals += "</ul></li>"
 
     html = f"""
     <p>Good morning Kris and Nana.</p>
@@ -347,6 +376,8 @@ def main():
     mismatches = []
 
     for item in consignments:
+        if item["gallery"] not in ACTIVE_GALLERIES:
+            continue
         if not item["source_url"]:
             continue
         found, their_price = scrape(item)
