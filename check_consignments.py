@@ -88,8 +88,6 @@ def load_tracked_artists():
     except Exception as e:
         print(f"DEBUG: failed to load artists sheet: {e}")
     print(f"DEBUG: loaded {len(artists)} tracked artists")
-    if artists:
-        print(f"DEBUG: sample artists: {list(artists)[:5]}")
     return artists
 
 
@@ -238,18 +236,22 @@ def scrape(item):
 # ── New arrivals ──────────────────────────────────────────────────────────────
 
 def check_new_arrivals(tracked_artists, consignments):
-    already_have = set()
+    already_have_urls = set()
+    already_have_titles = set()
     for item in consignments:
-        if item["gallery"] == "lougher" and item["source_url"]:
-            already_have.add(item["source_url"].lower().split("?")[0].rstrip("/"))
-    print(f"DEBUG: {len(already_have)} Lougher URLs already in inventory")
-
+        if item["gallery"] == "lougher":
+            if item["source_url"]:
+                already_have_urls.add(item["source_url"].lower().split("?")[0].rstrip("/"))
+            if item["artist"] and item["title"]:
+                key = (item["artist"].lower().strip(), item["title"].lower().strip())
+                already_have_titles.add(key)
+    print(f"DEBUG: {len(already_have_urls)} Lougher URLs, {len(already_have_titles)} Lougher titles in inventory")
     arrivals = []
-    arrivals += _lougher_arrivals(tracked_artists, already_have)
+    arrivals += _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles)
     return arrivals
 
 
-def _lougher_arrivals(tracked_artists, already_have):
+def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
     found = []
     seen_urls = set()
     page = 1
@@ -264,10 +266,7 @@ def _lougher_arrivals(tracked_artists, already_have):
             break
         products = data.get("products", [])
         if not products:
-            print(f"DEBUG: no products on page {page}, stopping")
             break
-        vendors = set(p.get("vendor", "") for p in products)
-        print(f"DEBUG page {page}: {len(products)} products, vendors: {vendors}")
         total_products += len(products)
         for product in products:
             vendor = product.get("vendor", "")
@@ -277,13 +276,20 @@ def _lougher_arrivals(tracked_artists, already_have):
             handle = product.get("handle", "")
             full_url = f"https://www.loughercontemporary.com/products/{handle}"
             clean_url = full_url.lower().rstrip("/")
-            if clean_url in already_have:
+            if clean_url in already_have_urls:
                 continue
             if clean_url in seen_urls:
                 continue
             title_lower = title.lower()
             for artist in tracked_artists:
                 if artist in title_lower:
+                    already_by_title = False
+                    for inv_artist, inv_title in already_have_titles:
+                        if inv_artist in title_lower and inv_title in title_lower:
+                            already_by_title = True
+                            break
+                    if already_by_title:
+                        continue
                     seen_urls.add(clean_url)
                     found.append({
                         "artist":  artist.title(),
@@ -295,7 +301,7 @@ def _lougher_arrivals(tracked_artists, already_have):
         if len(products) < 250:
             break
         page += 1
-    print(f"DEBUG: total products fetched: {total_products}, new arrivals found: {len(found)}")
+    print(f"DEBUG: total products: {total_products}, new arrivals: {len(found)}")
     return found
 
 
