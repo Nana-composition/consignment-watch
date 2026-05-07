@@ -249,7 +249,7 @@ def check_new_arrivals(tracked_artists, consignments):
 
 def _lougher_arrivals(tracked_artists, already_have):
     found = []
-    url = "https://www.loughercontemporary.com/collections/all"
+    url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary"
     soup = fetch_soup(url)
     if not soup:
         return found
@@ -264,15 +264,6 @@ def _lougher_arrivals(tracked_artists, already_have):
             continue
         if clean_url in seen_urls:
             continue
-        product_soup = fetch_soup(full_url)
-        if product_soup:
-            page_text = product_soup.get_text()
-            if any(phrase in page_text for phrase in [
-                "Consignment sales",
-                "Collect works sold by our trusted network",
-                "What is a Consignment work"
-            ]):
-                continue
         for artist in tracked_artists:
             if artist in text:
                 seen_urls.add(clean_url)
