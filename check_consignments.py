@@ -140,19 +140,26 @@ def load_consignments():
 # ── Scrapers ──────────────────────────────────────────────────────────────────
 
 def scrape_lougher(url):
-    soup = fetch_soup(url)
-    if soup is None:
-        return False, None
-    sold = soup.find(string=re.compile(r'sold out', re.I))
-    if sold:
-        return False, None
-    script = soup.find("script", string=re.compile(r'"price"'))
-    if script:
-        m = re.search(r'"price"\s*:\s*(\d+)', script.string)
-        if m:
-            return True, int(m.group(1)) / 100
-    return True, None
-
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+        if r.status_code == 404:
+            return False, None
+        if r.status_code != 200:
+            return None, None  # skip on other errors
+        # Try to get price from page
+        soup = BeautifulSoup(r.text, "lxml")
+        for script in soup.find_all("script"):
+            if not script.string:
+                continue
+            if '"price"' in script.string:
+                m = re.search(r'"price"\s*:\s*(\d+)', script.string)
+                if m:
+                    price = int(m.group(1)) / 100
+                    if price > 0:
+                        return True, price
+        return True, None
+    except Exception:
+        return None, None
 
 def scrape_clifton(url):
     soup = fetch_soup(url)
