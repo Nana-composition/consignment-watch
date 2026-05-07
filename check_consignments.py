@@ -117,9 +117,9 @@ def load_consignments():
         if not gallery_key:
             continue
 
-        source_url = extract_url(col(row, "Internal Comment / source website"))
+        source_url = extract_url(col(row, "Internal Comment"))
         admin_link = col(row, "Admin Link")
-        retail_raw = col(row, "Retail Price")
+        retail_raw = col(row, "Retail")
         net_raw    = col(row, "Net Price")
         price_col  = PRICE_COLUMN[gallery_key]
         our_price  = parse_price(net_raw if price_col == "net" else retail_raw)
