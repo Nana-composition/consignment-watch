@@ -276,9 +276,9 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
             handle = product.get("handle", "")
             full_url = f"https://www.loughercontemporary.com/products/{handle}"
             clean_url = full_url.lower().rstrip("/")
-            if page == 1 and total_products < 10:
-                print(f"DEBUG URL check: '{clean_url}' in already_have: {clean_url in already_have_urls}")
-                if clean_url in already_have_urls:
+            if clean_url in already_have_urls:
+                if page == 1 and len(found) == 0:
+                    print(f"DEBUG matched URL: {clean_url}")
                 continue
             if clean_url in seen_urls:
                 continue
