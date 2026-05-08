@@ -44,7 +44,7 @@ PRICE_COLUMN = {
     "fontaine":  None,
 }
 
-ACTIVE_GALLERIES = {"lougher"}
+ACTIVE_GALLERIES = {"lougher", "clifton", "bents", "fils", "fontaine", "poligrafa"}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,13 +66,21 @@ def parse_price(raw):
         return None
 
 
-def fetch_soup(url):
+def fetch_page(url):
+    """Fetch a URL, following redirects. Returns (status_code, soup) or (None, None) on error."""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-        return BeautifulSoup(r.text, "lxml")
+        r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
+        soup = BeautifulSoup(r.text, "lxml")
+        return r.status_code, soup
     except Exception:
-        return None
+        return None, None
+
+
+def fetch_soup(url):
+    status, soup = fetch_page(url)
+    if status == 200:
+        return soup
+    return None
 
 
 def load_tracked_artists():
@@ -161,53 +169,100 @@ def scrape_lougher(url):
 
 
 def scrape_clifton(url):
-    soup = fetch_soup(url)
-    if soup is None:
+    status, soup = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
         return False, None
-    sold = soup.find(string=re.compile(r'sold out|not available', re.I))
+    if soup is None:
+        return None, None
+    # Check for "Sold" text on page
+    sold = soup.find(string=re.compile(r'\bSold\b', re.I))
     if sold:
         return False, None
-    price_tag = soup.find(class_=re.compile(r'price', re.I))
-    price = parse_price(price_tag.get_text()) if price_tag else None
-    return True, price
+    # Extract price — looks like £8,500.00
+    price_tag = soup.find(string=re.compile(r'£[\d,]+\.?\d*'))
+    if price_tag:
+        return True, parse_price(str(price_tag))
+    return True, None
 
 
 def scrape_bents(url):
-    soup = fetch_soup(url)
-    if soup is None:
+    status, soup = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
         return False, None
-    sold = soup.find(string=re.compile(r'sold|not available', re.I))
+    if soup is None:
+        return None, None
+    # Check for "Sold" text
+    sold = soup.find(string=re.compile(r'\bSold\b', re.I))
     if sold:
         return False, None
-    price_tag = soup.find(class_=re.compile(r'price', re.I))
-    price = parse_price(price_tag.get_text()) if price_tag else None
-    return True, price
+    # Extract price — looks like £18,500.00
+    price_tag = soup.find(string=re.compile(r'£[\d,]+\.?\d*'))
+    if price_tag:
+        return True, parse_price(str(price_tag))
+    return True, None
 
 
 def scrape_fils(url):
-    soup = fetch_soup(url)
+    status, soup = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
+        return False, None
     if soup is None:
-        return False, None
-    sold = soup.find(string=re.compile(r'sold|vergriffen|not available', re.I))
-    if sold:
-        return False, None
-    price_tag = soup.find(class_=re.compile(r'price', re.I))
-    price = parse_price(price_tag.get_text()) if price_tag else None
-    return True, price
+        return None, None
+    # Check if we landed on a landing/home page (redirect)
+    if "alle-kunstwerke" not in url and "kunst-kaufen" not in url:
+        return None, None
+    # Check page title still looks like a product page
+    title_tag = soup.find("title")
+    if title_tag and "fils" in title_tag.get_text().lower() and "kunstwerk" not in title_tag.get_text().lower():
+        # Probably redirected to home
+        return None, None
+    # Extract price — looks like 990,00 €
+    price_match = re.search(r'([\d]+[.,]\d+)\s*€', soup.get_text())
+    if price_match:
+        price_str = price_match.group(1).replace(',', '.')
+        try:
+            return True, float(price_str)
+        except ValueError:
+            pass
+    return True, None
 
 
 def scrape_fontaine(url):
-    soup = fetch_soup(url)
-    if soup is None:
+    status, soup = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
         return False, None
+    if soup is None:
+        return None, None
     return True, None
 
 
 def scrape_poligrafa(url, title):
-    soup = fetch_soup(url)
-    if soup is None:
+    status, soup = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
         return False, None
-    if title and title.lower() in soup.get_text().lower():
+    if soup is None:
+        return None, None
+    page_text = soup.get_text()
+    # Check if artwork title appears on page
+    if title and title.lower() in page_text.lower():
+        # Try to find price — looks like 2000 €
+        price_match = re.search(r'([\d]+[.,]?\d*)\s*€', page_text)
+        if price_match:
+            price_str = price_match.group(1).replace(',', '.')
+            try:
+                return True, float(price_str)
+            except ValueError:
+                pass
         return True, None
     return False, None
 
@@ -243,8 +298,7 @@ def check_new_arrivals(tracked_artists, consignments):
             if item["source_url"]:
                 already_have_urls.add(item["source_url"].lower().split("?")[0].rstrip("/"))
             if item["artist"] and item["title"]:
-                key = (item["artist"].lower().strip(), item["title"].lower().strip())
-                already_have_titles.add(key)
+                already_have_titles.add((item["artist"].lower().strip(), item["title"].lower().strip()))
     print(f"DEBUG: {len(already_have_urls)} Lougher URLs, {len(already_have_titles)} Lougher titles in inventory")
     arrivals = []
     arrivals += _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles)
@@ -260,10 +314,10 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
         url = base_url if page == 1 else f"{base_url}&page={page}"
         soup = fetch_soup(url)
         if not soup:
-            print(f"DEBUG: could not fetch page {page}")
+            print(f"DEBUG: could not fetch Lougher page {page}")
             break
         links = soup.select("a[href*='/products/']")
-        print(f"DEBUG page {page}: found {len(links)} product links")
+        print(f"DEBUG Lougher page {page}: found {len(links)} product links")
         if not links:
             break
         new_on_page = 0
@@ -283,6 +337,12 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
                 continue
             for artist in tracked_artists:
                 if artist in text:
+                    already_by_title = any(
+                        inv_artist in text and inv_title in text
+                        for inv_artist, inv_title in already_have_titles
+                    )
+                    if already_by_title:
+                        continue
                     seen_urls.add(clean_url)
                     new_on_page += 1
                     found.append({
@@ -292,14 +352,14 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
                         "url":     full_url,
                     })
                     break
-        print(f"DEBUG page {page}: {new_on_page} new arrivals found")
+        print(f"DEBUG Lougher page {page}: {new_on_page} new arrivals")
         next_page = soup.select_one("a[href*='page=']")
         if not next_page:
             break
         page += 1
         if page > 10:
             break
-    print(f"DEBUG: total new arrivals: {len(found)}")
+    print(f"DEBUG: total Lougher new arrivals: {len(found)}")
     return found
 
 
