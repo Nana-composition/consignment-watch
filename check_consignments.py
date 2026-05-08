@@ -254,56 +254,52 @@ def check_new_arrivals(tracked_artists, consignments):
 def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
     found = []
     seen_urls = set()
+    base_url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary&sort_by=created-descending"
     page = 1
-    total_products = 0
     while True:
-        url = f"https://www.loughercontemporary.com/collections/all/products.json?limit=250&page={page}"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=20)
-            data = r.json()
-        except Exception as e:
-            print(f"DEBUG: JSON API error on page {page}: {e}")
+        url = base_url if page == 1 else f"{base_url}&page={page}"
+        soup = fetch_soup(url)
+        if not soup:
+            print(f"DEBUG: could not fetch page {page}")
             break
-        products = data.get("products", [])
-        if not products:
+        links = soup.select("a[href*='/products/']")
+        print(f"DEBUG page {page}: found {len(links)} product links")
+        if not links:
             break
-        total_products += len(products)
-        for product in products:
-            vendor = product.get("vendor", "")
-            if vendor != "Lougher Contemporary":
+        new_on_page = 0
+        for a in links:
+            href = a.get("href", "")
+            if not href:
                 continue
-            title = product.get("title", "")
-            handle = product.get("handle", "")
-            full_url = f"https://www.loughercontemporary.com/products/{handle}"
-            clean_url = full_url.lower().rstrip("/")
+            full_url = ("https://www.loughercontemporary.com" + href
+                        if href.startswith("/") else href)
+            clean_url = full_url.lower().split("?")[0].rstrip("/")
             if clean_url in already_have_urls:
-                if page == 1 and len(found) == 0:
-                    print(f"DEBUG matched URL: {clean_url}")
                 continue
             if clean_url in seen_urls:
                 continue
-            title_lower = title.lower()
+            text = a.get_text(strip=True).lower()
+            if not text:
+                continue
             for artist in tracked_artists:
-                if artist in title_lower:
-                    already_by_title = False
-                    for inv_artist, inv_title in already_have_titles:
-                        if inv_artist in title_lower and inv_title in title_lower:
-                            already_by_title = True
-                            break
-                    if already_by_title:
-                        continue
+                if artist in text:
                     seen_urls.add(clean_url)
+                    new_on_page += 1
                     found.append({
                         "artist":  artist.title(),
-                        "title":   title,
+                        "title":   a.get_text(strip=True),
                         "gallery": "Lougher",
                         "url":     full_url,
                     })
                     break
-        if len(products) < 250:
+        print(f"DEBUG page {page}: {new_on_page} new arrivals found")
+        next_page = soup.select_one("a[href*='page=']")
+        if not next_page:
             break
         page += 1
-    print(f"DEBUG: total products: {total_products}, new arrivals: {len(found)}")
+        if page > 10:
+            break
+    print(f"DEBUG: total new arrivals: {len(found)}")
     return found
 
 
