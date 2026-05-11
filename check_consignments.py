@@ -57,9 +57,16 @@ def extract_url(cell_value):
 
 
 def parse_price(raw):
+    """Parse price string to float, handling both English and European formats."""
     if raw is None:
         return None
-    text = re.sub(r'[^\d.]', '', str(raw))
+    text = str(raw).strip()
+    # European format: 7.200,00 → 7200.00
+    if re.search(r'\d+\.\d{3},\d{2}', text):
+        text = text.replace('.', '').replace(',', '.')
+    elif re.search(r'\d+,\d{2}', text):
+        text = text.replace(',', '.')
+    text = re.sub(r'[^\d.]', '', text)
     try:
         return float(text) if text else None
     except ValueError:
@@ -67,20 +74,28 @@ def parse_price(raw):
 
 
 def fetch_page(url):
-    """Fetch a URL, following redirects. Returns (status_code, soup) or (None, None) on error."""
     try:
         r = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
         soup = BeautifulSoup(r.text, "lxml")
-        return r.status_code, soup
+        return r.status_code, soup, r.text
     except Exception:
-        return None, None
+        return None, None, None
 
 
 def fetch_soup(url):
-    status, soup = fetch_page(url)
+    status, soup, _ = fetch_page(url)
     if status == 200:
         return soup
     return None
+
+
+def url_handle(url):
+    """Extract just the product handle from a Lougher URL for comparison."""
+    if not url:
+        return None
+    # Get last non-empty path segment, strip query params
+    path = url.lower().split("?")[0].rstrip("/")
+    return path.split("/")[-1]
 
 
 def load_tracked_artists():
@@ -169,26 +184,7 @@ def scrape_lougher(url):
 
 
 def scrape_clifton(url):
-    status, soup = fetch_page(url)
-    if status is None:
-        return None, None
-    if status == 404:
-        return False, None
-    if soup is None:
-        return None, None
-    # Check for "Sold" text on page
-    sold = soup.find(string=re.compile(r'\bSold\b', re.I))
-    if sold:
-        return False, None
-    # Extract price — looks like £8,500.00
-    price_tag = soup.find(string=re.compile(r'£[\d,]+\.?\d*'))
-    if price_tag:
-        return True, parse_price(str(price_tag))
-    return True, None
-
-
-def scrape_bents(url):
-    status, soup = fetch_page(url)
+    status, soup, _ = fetch_page(url)
     if status is None:
         return None, None
     if status == 404:
@@ -196,45 +192,53 @@ def scrape_bents(url):
     if soup is None:
         return None, None
     # Check for "Sold" text
-    sold = soup.find(string=re.compile(r'\bSold\b', re.I))
-    if sold:
+    page_text = soup.get_text()
+    if re.search(r'\bSold\b', page_text):
         return False, None
-    # Extract price — looks like £18,500.00
-    price_tag = soup.find(string=re.compile(r'£[\d,]+\.?\d*'))
-    if price_tag:
-        return True, parse_price(str(price_tag))
+    # Extract price — look for £X,XXX.XX pattern
+    price_match = re.search(r'£([\d,]+\.?\d*)', page_text)
+    if price_match:
+        return True, parse_price(price_match.group(1))
     return True, None
 
 
-def scrape_fils(url):
-    status, soup = fetch_page(url)
+def scrape_bents(url):
+    status, soup, _ = fetch_page(url)
     if status is None:
         return None, None
     if status == 404:
         return False, None
     if soup is None:
         return None, None
-    # Check if we landed on a landing/home page (redirect)
-    if "alle-kunstwerke" not in url and "kunst-kaufen" not in url:
-        return None, None
-    # Check page title still looks like a product page
-    title_tag = soup.find("title")
-    if title_tag and "fils" in title_tag.get_text().lower() and "kunstwerk" not in title_tag.get_text().lower():
-        # Probably redirected to home
-        return None, None
-    # Extract price — looks like 990,00 €
-    price_match = re.search(r'([\d]+[.,]\d+)\s*€', soup.get_text())
+    page_text = soup.get_text()
+    if re.search(r'\bSold\b', page_text):
+        return False, None
+    price_match = re.search(r'£([\d,]+\.?\d*)', page_text)
     if price_match:
-        price_str = price_match.group(1).replace(',', '.')
-        try:
-            return True, float(price_str)
-        except ValueError:
-            pass
+        return True, parse_price(price_match.group(1))
+    return True, None
+
+
+def scrape_fils(url):
+    status, soup, raw_text = fetch_page(url)
+    if status is None:
+        return None, None
+    if status == 404:
+        return False, None
+    if soup is None:
+        return None, None
+    # Check we didn't get redirected to home page
+    if not soup.find(string=re.compile(r'In den Warenkorb|Warenkorb|inkl.*MwSt', re.I)):
+        return None, None
+    # Extract European price format: 7.200,00 €
+    price_match = re.search(r'([\d]+(?:\.\d{3})*,\d{2})\s*€', soup.get_text())
+    if price_match:
+        return True, parse_price(price_match.group(1))
     return True, None
 
 
 def scrape_fontaine(url):
-    status, soup = fetch_page(url)
+    status, soup, _ = fetch_page(url)
     if status is None:
         return None, None
     if status == 404:
@@ -245,24 +249,19 @@ def scrape_fontaine(url):
 
 
 def scrape_poligrafa(url, title):
-    status, soup = fetch_page(url)
+    status, soup, raw_text = fetch_page(url)
     if status is None:
         return None, None
     if status == 404:
         return False, None
-    if soup is None:
+    if not raw_text:
         return None, None
-    page_text = soup.get_text()
-    # Check if artwork title appears on page
-    if title and title.lower() in page_text.lower():
-        # Try to find price — looks like 2000 €
-        price_match = re.search(r'([\d]+[.,]?\d*)\s*€', page_text)
+    # Title is in page source even though displayed as popup
+    if title and title.lower() in raw_text.lower():
+        # Try to find price near the title
+        price_match = re.search(r'([\d]+(?:[.,]\d+)?)\s*€', raw_text)
         if price_match:
-            price_str = price_match.group(1).replace(',', '.')
-            try:
-                return True, float(price_str)
-            except ValueError:
-                pass
+            return True, parse_price(price_match.group(1))
         return True, None
     return False, None
 
@@ -291,23 +290,21 @@ def scrape(item):
 # ── New arrivals ──────────────────────────────────────────────────────────────
 
 def check_new_arrivals(tracked_artists, consignments):
-    already_have_urls = set()
-    already_have_titles = set()
+    already_have_handles = set()
     for item in consignments:
-        if item["gallery"] == "lougher":
-            if item["source_url"]:
-                already_have_urls.add(item["source_url"].lower().split("?")[0].rstrip("/"))
-            if item["artist"] and item["title"]:
-                already_have_titles.add((item["artist"].lower().strip(), item["title"].lower().strip()))
-    print(f"DEBUG: {len(already_have_urls)} Lougher URLs, {len(already_have_titles)} Lougher titles in inventory")
+        if item["gallery"] == "lougher" and item["source_url"]:
+            h = url_handle(item["source_url"])
+            if h:
+                already_have_handles.add(h)
+    print(f"DEBUG: {len(already_have_handles)} Lougher handles in inventory")
     arrivals = []
-    arrivals += _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles)
+    arrivals += _lougher_arrivals(tracked_artists, already_have_handles)
     return arrivals
 
 
-def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
+def _lougher_arrivals(tracked_artists, already_have_handles):
     found = []
-    seen_urls = set()
+    seen_handles = set()
     base_url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary&sort_by=created-descending"
     page = 1
     while True:
@@ -317,7 +314,7 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
             print(f"DEBUG: could not fetch Lougher page {page}")
             break
         links = soup.select("a[href*='/products/']")
-        print(f"DEBUG Lougher page {page}: found {len(links)} product links")
+        print(f"DEBUG Lougher page {page}: {len(links)} product links")
         if not links:
             break
         new_on_page = 0
@@ -327,23 +324,19 @@ def _lougher_arrivals(tracked_artists, already_have_urls, already_have_titles):
                 continue
             full_url = ("https://www.loughercontemporary.com" + href
                         if href.startswith("/") else href)
-            clean_url = full_url.lower().split("?")[0].rstrip("/")
-            if clean_url in already_have_urls:
+            handle = url_handle(full_url)
+            if not handle:
                 continue
-            if clean_url in seen_urls:
+            if handle in already_have_handles:
+                continue
+            if handle in seen_handles:
                 continue
             text = a.get_text(strip=True).lower()
             if not text:
                 continue
             for artist in tracked_artists:
                 if artist in text:
-                    already_by_title = any(
-                        inv_artist in text and inv_title in text
-                        for inv_artist, inv_title in already_have_titles
-                    )
-                    if already_by_title:
-                        continue
-                    seen_urls.add(clean_url)
+                    seen_handles.add(handle)
                     new_on_page += 1
                     found.append({
                         "artist":  artist.title(),
@@ -387,29 +380,32 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
     def link(url, text):
         return f'<a href="{url}">{text}</a>' if url else text
 
-    def group_by_consigner(items):
+    def group_and_sort(items):
         groups = {}
         for i in items:
             key = i["consigner"]
             groups.setdefault(key, []).append(i)
+        # Sort items within each group by artist name
+        for key in groups:
+            groups[key].sort(key=lambda x: x.get("artist", "").lower())
         return groups
 
-    sold_groups = group_by_consigner(sold)
+    sold_groups = group_and_sort(sold)
     rows_sold = ""
-    for consigner, items in sorted(sold_groups.items()):
+    for consigner in sorted(sold_groups.keys()):
         rows_sold += f"<li><strong>{consigner}</strong><ul>"
-        for i in items:
+        for i in sold_groups[consigner]:
             rows_sold += (
                 f"<li>{i['artist']} &ldquo;{i['title']}&rdquo; "
                 f"[{link(i['source_url'], 'gallery')} | {link(i['admin_link'], 'admin')}]</li>"
             )
         rows_sold += "</ul></li>"
 
-    mismatch_groups = group_by_consigner(mismatches)
+    mismatch_groups = group_and_sort(mismatches)
     rows_mismatch = ""
-    for consigner, items in sorted(mismatch_groups.items()):
+    for consigner in sorted(mismatch_groups.keys()):
         rows_mismatch += f"<li><strong>{consigner}</strong><ul>"
-        for i in items:
+        for i in mismatch_groups[consigner]:
             rows_mismatch += (
                 f"<li>{i['artist']} &ldquo;{i['title']}&rdquo;: "
                 f"our {i['our_price']} vs theirs {i['their_price']} "
@@ -420,10 +416,12 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
     arrival_groups = {}
     for a in arrivals:
         arrival_groups.setdefault(a["gallery"], []).append(a)
+    for key in arrival_groups:
+        arrival_groups[key].sort(key=lambda x: x.get("artist", "").lower())
     rows_arrivals = ""
-    for gallery, items in sorted(arrival_groups.items()):
+    for gallery in sorted(arrival_groups.keys()):
         rows_arrivals += f"<li><strong>{gallery}</strong><ul>"
-        for a in items:
+        for a in arrival_groups[gallery]:
             rows_arrivals += f"<li>{a['artist']} &mdash; {link(a['url'], a['title'])}</li>"
         rows_arrivals += "</ul></li>"
 
