@@ -1,6 +1,7 @@
 import os
 import re
 import csv
+import time
 import smtplib
 import urllib.request
 from datetime import date
@@ -57,11 +58,9 @@ def extract_url(cell_value):
 
 
 def parse_price(raw):
-    """Parse price string to float, handling both English and European formats."""
     if raw is None:
         return None
     text = str(raw).strip()
-    # European format: 7.200,00 → 7200.00
     if re.search(r'\d+\.\d{3},\d{2}', text):
         text = text.replace('.', '').replace(',', '.')
     elif re.search(r'\d+,\d{2}', text):
@@ -90,10 +89,8 @@ def fetch_soup(url):
 
 
 def url_handle(url):
-    """Extract just the product handle from a Lougher URL for comparison."""
     if not url:
         return None
-    # Get last non-empty path segment, strip query params
     path = url.lower().split("?")[0].rstrip("/")
     return path.split("/")[-1]
 
@@ -191,14 +188,20 @@ def scrape_clifton(url):
         return False, None
     if soup is None:
         return None, None
-    # Check for "Sold" text
     page_text = soup.get_text()
     if re.search(r'\bSold\b', page_text):
         return False, None
-    # Extract price — look for £X,XXX.XX pattern
-    price_match = re.search(r'£([\d,]+\.?\d*)', page_text)
-    if price_match:
-        return True, parse_price(price_match.group(1))
+    # Find price in a dedicated price element
+    price_tag = soup.find(class_=re.compile(r'price', re.I))
+    if price_tag:
+        price_text = price_tag.get_text(strip=True)
+        m = re.search(r'£([\d,]+\.?\d*)', price_text)
+        if m:
+            return True, parse_price(m.group(1))
+    # Fallback: find first £X,XXX.XX in page
+    m = re.search(r'£([\d,]{4,}\.?\d*)', page_text)
+    if m:
+        return True, parse_price(m.group(1))
     return True, None
 
 
@@ -213,24 +216,22 @@ def scrape_bents(url):
     page_text = soup.get_text()
     if re.search(r'\bSold\b', page_text):
         return False, None
-    price_match = re.search(r'£([\d,]+\.?\d*)', page_text)
-    if price_match:
-        return True, parse_price(price_match.group(1))
+    m = re.search(r'£([\d,]{4,}\.?\d*)', page_text)
+    if m:
+        return True, parse_price(m.group(1))
     return True, None
 
 
 def scrape_fils(url):
-    status, soup, raw_text = fetch_page(url)
+    status, soup, _ = fetch_page(url)
     if status is None:
         return None, None
     if status == 404:
         return False, None
     if soup is None:
         return None, None
-    # Check we didn't get redirected to home page
-    if not soup.find(string=re.compile(r'In den Warenkorb|Warenkorb|inkl.*MwSt', re.I)):
+    if not soup.find(string=re.compile(r'In den Warenkorb|inkl.*MwSt', re.I)):
         return None, None
-    # Extract European price format: 7.200,00 €
     price_match = re.search(r'([\d]+(?:\.\d{3})*,\d{2})\s*€', soup.get_text())
     if price_match:
         return True, parse_price(price_match.group(1))
@@ -256,13 +257,8 @@ def scrape_poligrafa(url, title):
         return False, None
     if not raw_text:
         return None, None
-    # Title is in page source even though displayed as popup
     if title and title.lower() in raw_text.lower():
-        # Try to find price near the title
-        price_match = re.search(r'([\d]+(?:[.,]\d+)?)\s*€', raw_text)
-        if price_match:
-            return True, parse_price(price_match.group(1))
-        return True, None
+        return True, None  # Skip price — too unreliable on artist pages
     return False, None
 
 
@@ -290,19 +286,26 @@ def scrape(item):
 # ── New arrivals ──────────────────────────────────────────────────────────────
 
 def check_new_arrivals(tracked_artists, consignments):
-    already_have_handles = set()
+    # Build sets of what we already have per gallery
+    already = {g: {"handles": set(), "titles": set()} for g in ACTIVE_GALLERIES}
     for item in consignments:
-        if item["gallery"] == "lougher" and item["source_url"]:
-            h = url_handle(item["source_url"])
-            if h:
-                already_have_handles.add(h)
-    print(f"DEBUG: {len(already_have_handles)} Lougher handles in inventory")
+        g = item["gallery"]
+        if item["source_url"]:
+            already[g]["handles"].add(url_handle(item["source_url"]))
+        if item["title"]:
+            already[g]["titles"].add(item["title"].lower().strip())
+
     arrivals = []
-    arrivals += _lougher_arrivals(tracked_artists, already_have_handles)
+    arrivals += _lougher_arrivals(tracked_artists, already["lougher"])
+    arrivals += _clifton_arrivals(tracked_artists, already["clifton"])
+    arrivals += _bents_arrivals(tracked_artists, already["bents"])
+    arrivals += _fils_arrivals(tracked_artists, already["fils"])
+    arrivals += _fontaine_arrivals(tracked_artists, already["fontaine"])
+    arrivals += _poligrafa_arrivals(tracked_artists, already["poligrafa"])
     return arrivals
 
 
-def _lougher_arrivals(tracked_artists, already_have_handles):
+def _lougher_arrivals(tracked_artists, already):
     found = []
     seen_handles = set()
     base_url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary&sort_by=created-descending"
@@ -314,7 +317,6 @@ def _lougher_arrivals(tracked_artists, already_have_handles):
             print(f"DEBUG: could not fetch Lougher page {page}")
             break
         links = soup.select("a[href*='/products/']")
-        print(f"DEBUG Lougher page {page}: {len(links)} product links")
         if not links:
             break
         new_on_page = 0
@@ -325,11 +327,7 @@ def _lougher_arrivals(tracked_artists, already_have_handles):
             full_url = ("https://www.loughercontemporary.com" + href
                         if href.startswith("/") else href)
             handle = url_handle(full_url)
-            if not handle:
-                continue
-            if handle in already_have_handles:
-                continue
-            if handle in seen_handles:
+            if not handle or handle in already["handles"] or handle in seen_handles:
                 continue
             text = a.get_text(strip=True).lower()
             if not text:
@@ -345,14 +343,244 @@ def _lougher_arrivals(tracked_artists, already_have_handles):
                         "url":     full_url,
                     })
                     break
-        print(f"DEBUG Lougher page {page}: {new_on_page} new arrivals")
         next_page = soup.select_one("a[href*='page=']")
         if not next_page:
             break
         page += 1
         if page > 10:
             break
-    print(f"DEBUG: total Lougher new arrivals: {len(found)}")
+    print(f"DEBUG Lougher new arrivals: {len(found)}")
+    return found
+
+
+def _clifton_arrivals(tracked_artists, already):
+    found = []
+    # Get artist list from Clifton
+    soup = fetch_soup("https://www.cliftongallery.com/artists")
+    if not soup:
+        print("DEBUG: could not fetch Clifton artists page")
+        return found
+    # Find all artist page links
+    artist_links = {}
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        text = a.get_text(strip=True).lower()
+        if not text or not href:
+            continue
+        for artist in tracked_artists:
+            if artist == text or artist in text:
+                full_url = href if href.startswith("http") else "https://www.cliftongallery.com" + href
+                artist_links[artist] = full_url
+                break
+
+    for artist, artist_url in artist_links.items():
+        soup = fetch_soup(artist_url)
+        if not soup:
+            continue
+        for a in soup.select("a[href*='/product-page/']"):
+            href = a.get("href", "")
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else "https://www.cliftongallery.com" + href
+            handle = url_handle(full_url)
+            if handle in already["handles"]:
+                continue
+            title = a.get_text(strip=True)
+            if not title or title.lower() in already["titles"]:
+                continue
+            # Check page is not sold
+            status, page_soup, _ = fetch_page(full_url)
+            if status == 404:
+                continue
+            if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
+                continue
+            already["handles"].add(handle)
+            found.append({
+                "artist":  artist.title(),
+                "title":   title,
+                "gallery": "Clifton",
+                "url":     full_url,
+            })
+        time.sleep(0.5)
+    print(f"DEBUG Clifton new arrivals: {len(found)}")
+    return found
+
+
+def _bents_arrivals(tracked_artists, already):
+    found = []
+    for artist in tracked_artists:
+        # Build Bents artist URL: firstname-lastname
+        parts = artist.strip().split()
+        if len(parts) < 2:
+            slug = parts[0]
+        else:
+            slug = "-".join(parts)
+        artist_url = f"https://bentscontemporary.co.uk/artist/{slug}/"
+        soup = fetch_soup(artist_url)
+        if not soup:
+            continue
+        for a in soup.select("a[href*='/artwork/']"):
+            href = a.get("href", "")
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else "https://bentscontemporary.co.uk" + href
+            handle = url_handle(full_url)
+            if handle in already["handles"]:
+                continue
+            title = a.get_text(strip=True)
+            if not title or title.lower() in already["titles"]:
+                continue
+            # Check not sold
+            status, page_soup, _ = fetch_page(full_url)
+            if status == 404:
+                continue
+            if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
+                continue
+            already["handles"].add(handle)
+            found.append({
+                "artist":  artist.title(),
+                "title":   title,
+                "gallery": "Bents",
+                "url":     full_url,
+            })
+        time.sleep(0.5)
+    print(f"DEBUG Bents new arrivals: {len(found)}")
+    return found
+
+
+def _fils_arrivals(tracked_artists, already):
+    found = []
+    for artist in tracked_artists:
+        # Build Fils artist URL: lastname-firstname
+        parts = artist.strip().split()
+        if len(parts) < 2:
+            slug = parts[0]
+        else:
+            slug = f"{parts[-1]}-{'-'.join(parts[:-1])}"
+        artist_url = f"https://www.fils-fine-arts.de/{slug}/"
+        status, soup, _ = fetch_page(artist_url)
+        if status != 200 or not soup:
+            continue
+        for a in soup.select("a[href*='kunst-kaufen']"):
+            href = a.get("href", "")
+            if not href:
+                continue
+            full_url = href if href.startswith("http") else "https://www.fils-fine-arts.de" + href
+            handle = url_handle(full_url)
+            if handle in already["handles"]:
+                continue
+            title = a.get_text(strip=True)
+            if not title or title.lower() in already["titles"]:
+                continue
+            already["handles"].add(handle)
+            found.append({
+                "artist":  artist.title(),
+                "title":   title,
+                "gallery": "Fils",
+                "url":     full_url,
+            })
+        time.sleep(0.5)
+    print(f"DEBUG Fils new arrivals: {len(found)}")
+    return found
+
+
+def _fontaine_arrivals(tracked_artists, already):
+    found = []
+    # Get all artists from Fontaine artists page
+    soup = fetch_soup("https://www.robertfontainegallery.com/artists/")
+    if not soup:
+        print("DEBUG: could not fetch Fontaine artists page")
+        return found
+
+    artist_links = {}
+    for a in soup.select("a[href*='/artists/']"):
+        text = a.get_text(strip=True).lower()
+        href = a.get("href", "")
+        if not text or not href:
+            continue
+        for artist in tracked_artists:
+            if artist in text or text in artist:
+                full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
+                if "/works" not in full_url:
+                    full_url = full_url.rstrip("/") + "/works/"
+                artist_links[artist] = full_url
+                break
+
+    for artist, artist_url in artist_links.items():
+        soup = fetch_soup(artist_url)
+        if not soup:
+            continue
+        for a in soup.select("a[href*='/works/']"):
+            href = a.get("href", "")
+            if not href or href == artist_url:
+                continue
+            full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
+            handle = url_handle(full_url)
+            if handle in already["handles"]:
+                continue
+            title = a.get_text(strip=True)
+            if not title or title.lower() in already["titles"]:
+                continue
+            # Check not 404
+            status, _, _ = fetch_page(full_url)
+            if status == 404:
+                continue
+            already["handles"].add(handle)
+            found.append({
+                "artist":  artist.title(),
+                "title":   title,
+                "gallery": "Fontaine",
+                "url":     full_url,
+            })
+        time.sleep(0.5)
+    print(f"DEBUG Fontaine new arrivals: {len(found)}")
+    return found
+
+
+def _poligrafa_arrivals(tracked_artists, already):
+    found = []
+    # Get all artists from Poligrafa artists page
+    soup = fetch_soup("https://poligrafa.net/en/artistas")
+    if not soup:
+        print("DEBUG: could not fetch Poligrafa artists page")
+        return found
+
+    artist_links = {}
+    for a in soup.select("a[href*='/artistas/']"):
+        text = a.get_text(strip=True).lower()
+        href = a.get("href", "")
+        if not text or not href:
+            continue
+        for artist in tracked_artists:
+            if artist in text or text in artist:
+                full_url = href if href.startswith("http") else "https://poligrafa.net" + href
+                artist_links[artist] = full_url
+                break
+
+    for artist, artist_url in artist_links.items():
+        status, soup, raw_text = fetch_page(artist_url)
+        if status != 200 or not raw_text:
+            continue
+        # Find all artwork titles in page source
+        titles_on_page = re.findall(r'"title"\s*:\s*"([^"]+)"', raw_text)
+        if not titles_on_page:
+            # Try alternative pattern
+            titles_on_page = re.findall(r'<h\d[^>]*>([^<]{3,80})</h\d>', raw_text)
+        for title in titles_on_page:
+            title_clean = title.strip()
+            if not title_clean:
+                continue
+            if title_clean.lower() in already["titles"]:
+                continue
+            already["titles"].add(title_clean.lower())
+            found.append({
+                "artist":  artist.title(),
+                "title":   title_clean,
+                "gallery": "Poligrafa",
+                "url":     artist_url,
+            })
+        time.sleep(0.5)
+    print(f"DEBUG Poligrafa new arrivals: {len(found)}")
     return found
 
 
@@ -383,9 +611,8 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
     def group_and_sort(items):
         groups = {}
         for i in items:
-            key = i["consigner"]
+            key = i["consigner"] if "consigner" in i else i.get("gallery", "")
             groups.setdefault(key, []).append(i)
-        # Sort items within each group by artist name
         for key in groups:
             groups[key].sort(key=lambda x: x.get("artist", "").lower())
         return groups
