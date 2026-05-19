@@ -146,7 +146,7 @@ def load_consignments():
         items.append({
             "id":         col(row, "Inventory Id"),
             "artist":     col(row, "Artist") or "",
-            "title":      col(row, "Title") or "",
+            "title":      str(col(row, "Title") or ""),
             "consigner":  consigner_raw,
             "gallery":    gallery_key,
             "source_url": source_url,
