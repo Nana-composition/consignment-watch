@@ -257,7 +257,7 @@ def scrape_poligrafa(url, title):
         return False, None
     if not raw_text:
         return None, None
-    if title and title.lower() in raw_text.lower():
+    if title and str(title).lower() in raw_text.lower():
         return True, None  # Skip price — too unreliable on artist pages
     return False, None
 
