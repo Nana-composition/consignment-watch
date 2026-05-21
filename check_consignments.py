@@ -191,17 +191,11 @@ def scrape_clifton(url):
     page_text = soup.get_text()
     if re.search(r'\bSold\b', page_text):
         return False, None
-    # Find price in a dedicated price element
-    price_tag = soup.find(class_=re.compile(r'price', re.I))
+    # Clifton uses Wix — price is in data-wix-price attribute
+    price_tag = soup.find(attrs={"data-wix-price": True})
     if price_tag:
-        price_text = price_tag.get_text(strip=True)
-        m = re.search(r'£([\d,]+\.?\d*)', price_text)
-        if m:
-            return True, parse_price(m.group(1))
-    # Fallback: find first £X,XXX.XX in page
-    m = re.search(r'£([\d,]{4,}\.?\d*)', page_text)
-    if m:
-        return True, parse_price(m.group(1))
+        raw = price_tag.get("data-wix-price", "")
+        return True, parse_price(raw)
     return True, None
 
 
@@ -258,7 +252,7 @@ def scrape_poligrafa(url, title):
     if not raw_text:
         return None, None
     if title and str(title).lower() in raw_text.lower():
-        return True, None  # Skip price — too unreliable on artist pages
+        return True, None
     return False, None
 
 
@@ -286,7 +280,6 @@ def scrape(item):
 # ── New arrivals ──────────────────────────────────────────────────────────────
 
 def check_new_arrivals(tracked_artists, consignments):
-    # Build sets of what we already have per gallery
     already = {g: {"handles": set(), "titles": set()} for g in ACTIVE_GALLERIES}
     for item in consignments:
         g = item["gallery"]
@@ -319,7 +312,6 @@ def _lougher_arrivals(tracked_artists, already):
         links = soup.select("a[href*='/products/']")
         if not links:
             break
-        new_on_page = 0
         for a in links:
             href = a.get("href", "")
             if not href:
@@ -335,7 +327,6 @@ def _lougher_arrivals(tracked_artists, already):
             for artist in tracked_artists:
                 if artist in text:
                     seen_handles.add(handle)
-                    new_on_page += 1
                     found.append({
                         "artist":  artist.title(),
                         "title":   a.get_text(strip=True),
@@ -355,103 +346,116 @@ def _lougher_arrivals(tracked_artists, already):
 
 def _clifton_arrivals(tracked_artists, already):
     found = []
-    # Get artist list from Clifton
-    soup = fetch_soup("https://www.cliftongallery.com/artists")
+    seen_handles = set()
+    # Fetch first 100 artworks from Clifton listing page
+    soup = fetch_soup("https://www.cliftongallery.com/all-artwork")
     if not soup:
-        print("DEBUG: could not fetch Clifton artists page")
+        print("DEBUG: could not fetch Clifton listing")
         return found
-    # Find all artist page links
-    artist_links = {}
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        text = a.get_text(strip=True).lower()
-        if not text or not href:
-            continue
-        for artist in tracked_artists:
-            if artist == text or artist in text:
-                full_url = href if href.startswith("http") else "https://www.cliftongallery.com" + href
-                artist_links[artist] = full_url
-                break
 
-    for artist, artist_url in artist_links.items():
-        soup = fetch_soup(artist_url)
-        if not soup:
+    links = soup.select("a[href*='/product-page/']")
+    print(f"DEBUG Clifton: found {len(links)} links on listing page")
+
+    count = 0
+    for a in links:
+        if count >= 100:
+            break
+        href = a.get("href", "")
+        if not href:
             continue
-        for a in soup.select("a[href*='/product-page/']"):
-            href = a.get("href", "")
-            if not href:
-                continue
-            full_url = href if href.startswith("http") else "https://www.cliftongallery.com" + href
-            handle = url_handle(full_url)
-            if handle in already["handles"]:
-                continue
-            title = a.get_text(strip=True)
-            if not title or title.lower() in already["titles"]:
-                continue
-            # Check page is not sold
-            status, page_soup, _ = fetch_page(full_url)
-            if status == 404:
-                continue
-            if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
-                continue
-            already["handles"].add(handle)
-            found.append({
-                "artist":  artist.title(),
-                "title":   title,
-                "gallery": "Clifton",
-                "url":     full_url,
-            })
-        time.sleep(0.5)
+        full_url = href if href.startswith("http") else "https://www.cliftongallery.com" + href
+        handle = url_handle(full_url)
+        if not handle or handle in already["handles"] or handle in seen_handles:
+            continue
+
+        # Get title and artist from link text or nearby elements
+        title_text = a.get_text(strip=True)
+        if not title_text or title_text.lower() in ("quick view", "view", ""):
+            # Try parent element
+            parent = a.parent
+            if parent:
+                title_text = parent.get_text(strip=True)
+
+        title_lower = title_text.lower()
+        for artist in tracked_artists:
+            if artist in title_lower:
+                # Check not sold — look for Sold text on the page
+                status, page_soup, _ = fetch_page(full_url)
+                if status == 404:
+                    break
+                if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
+                    break
+                seen_handles.add(handle)
+                count += 1
+                found.append({
+                    "artist":  artist.title(),
+                    "title":   title_text,
+                    "gallery": "Clifton",
+                    "url":     full_url,
+                })
+                break
+        time.sleep(0.3)
+
     print(f"DEBUG Clifton new arrivals: {len(found)}")
     return found
 
 
 def _bents_arrivals(tracked_artists, already):
     found = []
-    for artist in tracked_artists:
-        # Build Bents artist URL: firstname-lastname
-        parts = artist.strip().split()
-        if len(parts) < 2:
-            slug = parts[0]
-        else:
-            slug = "-".join(parts)
-        artist_url = f"https://bentscontemporary.co.uk/artist/{slug}/"
-        soup = fetch_soup(artist_url)
-        if not soup:
+    seen_handles = set()
+    soup = fetch_soup("https://bentscontemporary.co.uk/artworks/")
+    if not soup:
+        print("DEBUG: could not fetch Bents listing")
+        return found
+
+    links = soup.select("a[href*='/artwork/']")
+    print(f"DEBUG Bents: found {len(links)} links on listing page")
+
+    count = 0
+    for a in links:
+        if count >= 100:
+            break
+        href = a.get("href", "")
+        if not href:
             continue
-        for a in soup.select("a[href*='/artwork/']"):
-            href = a.get("href", "")
-            if not href:
-                continue
-            full_url = href if href.startswith("http") else "https://bentscontemporary.co.uk" + href
-            handle = url_handle(full_url)
-            if handle in already["handles"]:
-                continue
-            title = a.get_text(strip=True)
-            if not title or title.lower() in already["titles"]:
-                continue
-            # Check not sold
-            status, page_soup, _ = fetch_page(full_url)
-            if status == 404:
-                continue
-            if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
-                continue
-            already["handles"].add(handle)
-            found.append({
-                "artist":  artist.title(),
-                "title":   title,
-                "gallery": "Bents",
-                "url":     full_url,
-            })
-        time.sleep(0.5)
+        full_url = href if href.startswith("http") else "https://bentscontemporary.co.uk" + href
+        handle = url_handle(full_url)
+        if not handle or handle in already["handles"] or handle in seen_handles:
+            continue
+
+        title_text = a.get_text(strip=True)
+        if not title_text:
+            parent = a.parent
+            if parent:
+                title_text = parent.get_text(strip=True)
+
+        title_lower = title_text.lower()
+        for artist in tracked_artists:
+            if artist in title_lower:
+                status, page_soup, _ = fetch_page(full_url)
+                if status == 404:
+                    break
+                if page_soup and re.search(r'\bSold\b', page_soup.get_text()):
+                    break
+                seen_handles.add(handle)
+                count += 1
+                found.append({
+                    "artist":  artist.title(),
+                    "title":   title_text,
+                    "gallery": "Bents",
+                    "url":     full_url,
+                })
+                break
+        time.sleep(0.3)
+
     print(f"DEBUG Bents new arrivals: {len(found)}")
     return found
 
 
 def _fils_arrivals(tracked_artists, already):
     found = []
+    seen_handles = set()
     for artist in tracked_artists:
-        # Build Fils artist URL: lastname-firstname
         parts = artist.strip().split()
         if len(parts) < 2:
             slug = parts[0]
@@ -467,119 +471,137 @@ def _fils_arrivals(tracked_artists, already):
                 continue
             full_url = href if href.startswith("http") else "https://www.fils-fine-arts.de" + href
             handle = url_handle(full_url)
-            if handle in already["handles"]:
+            if not handle or handle in already["handles"] or handle in seen_handles:
                 continue
             title = a.get_text(strip=True)
             if not title or title.lower() in already["titles"]:
                 continue
-            already["handles"].add(handle)
+            seen_handles.add(handle)
             found.append({
                 "artist":  artist.title(),
                 "title":   title,
                 "gallery": "Fils",
                 "url":     full_url,
             })
-        time.sleep(0.5)
+        time.sleep(0.3)
     print(f"DEBUG Fils new arrivals: {len(found)}")
     return found
 
 
 def _fontaine_arrivals(tracked_artists, already):
     found = []
-    # Get all artists from Fontaine artists page
+    seen_handles = set()
     soup = fetch_soup("https://www.robertfontainegallery.com/artists/")
     if not soup:
         print("DEBUG: could not fetch Fontaine artists page")
         return found
 
-    artist_links = {}
+    # Build map of tracked artist → their Fontaine page URL
+    artist_pages = {}
     for a in soup.select("a[href*='/artists/']"):
-        text = a.get_text(strip=True).lower()
         href = a.get("href", "")
-        if not text or not href:
+        text = a.get_text(strip=True).lower()
+        if not text or not href or len(text) < 3:
             continue
         for artist in tracked_artists:
-            if artist in text or text in artist:
+            if artist == text or (len(artist) > 4 and artist in text):
                 full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
                 if "/works" not in full_url:
                     full_url = full_url.rstrip("/") + "/works/"
-                artist_links[artist] = full_url
+                artist_pages[artist] = full_url
                 break
 
-    for artist, artist_url in artist_links.items():
+    print(f"DEBUG Fontaine: found pages for {len(artist_pages)} tracked artists")
+
+    for artist, artist_url in artist_pages.items():
         soup = fetch_soup(artist_url)
         if not soup:
             continue
         for a in soup.select("a[href*='/works/']"):
             href = a.get("href", "")
-            if not href or href == artist_url:
+            if not href:
                 continue
             full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
+            if full_url.rstrip("/") == artist_url.rstrip("/"):
+                continue
             handle = url_handle(full_url)
-            if handle in already["handles"]:
+            if not handle or handle in already["handles"] or handle in seen_handles:
                 continue
             title = a.get_text(strip=True)
-            if not title or title.lower() in already["titles"]:
+            if not title or len(title) < 3:
+                continue
+            if title.lower() in already["titles"]:
                 continue
             # Check not 404
             status, _, _ = fetch_page(full_url)
             if status == 404:
                 continue
-            already["handles"].add(handle)
+            seen_handles.add(handle)
             found.append({
                 "artist":  artist.title(),
                 "title":   title,
                 "gallery": "Fontaine",
                 "url":     full_url,
             })
-        time.sleep(0.5)
+        time.sleep(0.3)
+
     print(f"DEBUG Fontaine new arrivals: {len(found)}")
     return found
 
 
 def _poligrafa_arrivals(tracked_artists, already):
     found = []
-    # Get all artists from Poligrafa artists page
+    seen_titles = set()
     soup = fetch_soup("https://poligrafa.net/en/artistas")
     if not soup:
         print("DEBUG: could not fetch Poligrafa artists page")
         return found
 
-    artist_links = {}
+    # Build map of tracked artist → their Poligrafa page URL
+    artist_pages = {}
     for a in soup.select("a[href*='/artistas/']"):
-        text = a.get_text(strip=True).lower()
         href = a.get("href", "")
-        if not text or not href:
+        text = a.get_text(strip=True).lower()
+        if not text or not href or len(text) < 3:
             continue
         for artist in tracked_artists:
-            if artist in text or text in artist:
+            if artist == text or (len(artist) > 4 and artist in text):
                 full_url = href if href.startswith("http") else "https://poligrafa.net" + href
-                artist_links[artist] = full_url
+                artist_pages[artist] = full_url
                 break
 
-    for artist, artist_url in artist_links.items():
+    print(f"DEBUG Poligrafa: found pages for {len(artist_pages)} tracked artists")
+
+    for artist, artist_url in artist_pages.items():
         status, soup, raw_text = fetch_page(artist_url)
         if status != 200 or not raw_text:
             continue
-        # Find all artwork titles in page source
-        titles_on_page = re.findall(r'"title"\s*:\s*"([^"]+)"', raw_text)
-        if not titles_on_page:
-            # Try alternative pattern
-            titles_on_page = re.findall(r'<h\d[^>]*>([^<]{3,80})</h\d>', raw_text)
-        for title in titles_on_page:
+
+        # Extract titles from JSON data in page source
+        titles_found = re.findall(r'"title"\s*:\s*"([^"]{3,80})"', raw_text)
+        # Deduplicate and filter
+        seen_on_page = set()
+        for title in titles_found:
             title_clean = title.strip()
-            if not title_clean:
+            if not title_clean or len(title_clean) < 3:
                 continue
-            if title_clean.lower() in already["titles"]:
+            title_lower = title_clean.lower()
+            if title_lower in already["titles"]:
                 continue
-            already["titles"].add(title_clean.lower())
+            if title_lower in seen_on_page:
+                continue
+            if title_lower in seen_titles:
+                continue
+            seen_on_page.add(title_lower)
+            seen_titles.add(title_lower)
             found.append({
                 "artist":  artist.title(),
                 "title":   title_clean,
                 "gallery": "Poligrafa",
                 "url":     artist_url,
             })
-        time.sleep(0.5)
+        time.sleep(0.3)
+
     print(f"DEBUG Poligrafa new arrivals: {len(found)}")
     return found
 
@@ -608,10 +630,10 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
     def link(url, text):
         return f'<a href="{url}">{text}</a>' if url else text
 
-    def group_and_sort(items):
+    def group_and_sort(items, key_field="consigner"):
         groups = {}
         for i in items:
-            key = i["consigner"] if "consigner" in i else i.get("gallery", "")
+            key = i.get(key_field) or i.get("gallery", "")
             groups.setdefault(key, []).append(i)
         for key in groups:
             groups[key].sort(key=lambda x: x.get("artist", "").lower())
@@ -640,11 +662,7 @@ def build_email(today, sold, mismatches, arrivals, total_checked):
             )
         rows_mismatch += "</ul></li>"
 
-    arrival_groups = {}
-    for a in arrivals:
-        arrival_groups.setdefault(a["gallery"], []).append(a)
-    for key in arrival_groups:
-        arrival_groups[key].sort(key=lambda x: x.get("artist", "").lower())
+    arrival_groups = group_and_sort(arrivals, key_field="gallery")
     rows_arrivals = ""
     for gallery in sorted(arrival_groups.keys()):
         rows_arrivals += f"<li><strong>{gallery}</strong><ul>"
