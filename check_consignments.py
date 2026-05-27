@@ -47,8 +47,18 @@ PRICE_COLUMN = {
 }
 
 ACTIVE_GALLERIES = {"lougher", "clifton", "bents", "fils", "fontaine", "poligrafa"}
+CHECK_SOLD_PRICE = {"lougher", "clifton", "bents", "fils", "fontaine", "poligrafa"}
 
 FILS_MIN_PRICE = 700.0
+
+FILS_NAV = {
+    "kunst kaufen", "fotografien", "grafiken", "mappen & sets",
+    "skulpturen & objekte", "unikate & gemälde", "zeitgenössische kunst",
+    "zeitgenössischen kunst", "pop art", "»pop art«",
+    "neo-expressionismus & neue figuration", "informel", "»informel«",
+    "zero", "op art & konkrete kunst", "op-art", "klassische kunst",
+    "realismus", "details", "details ansehen"
+}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -253,21 +263,16 @@ def scrape_poligrafa(url, title):
         return False, None
     if not raw_text:
         return None, None
-    decoded_page = html.unescape(raw_text)
-    decoded_title = html.unescape(str(title))
-    if decoded_title and decoded_title.lower() in decoded_page.lower():
-        return True, None
+    decoded = html.unescape(raw_text)
+    decoded_title = html.unescape(str(title)).lower().strip()
+    # Look for title specifically inside figcaption h1 elements
+    artwork_titles = re.findall(r'<figcaption[^>]*>.*?<h1>([^<]+)</h1>', decoded, re.DOTALL)
+    if not artwork_titles:
+        artwork_titles = re.findall(r'<h1>([^<]{3,80})</h1>', decoded)
+    for t in artwork_titles:
+        if html.unescape(t).lower().strip() == decoded_title:
+            return True, None
     return False, None
-
-
-SCRAPERS = {
-    "lougher":   scrape_lougher,
-    "clifton":   scrape_clifton,
-    "bents":     scrape_bents,
-    "fils":      scrape_fils,
-    "fontaine":  scrape_fontaine,
-    "poligrafa": scrape_poligrafa,
-}
 
 
 def scrape(item):
@@ -275,7 +280,17 @@ def scrape(item):
     if not url:
         return None, None
     gallery = item["gallery"]
-    scraper = SCRAPERS[gallery]
+    if gallery not in CHECK_SOLD_PRICE:
+        return None, None
+    scrapers = {
+        "lougher":   scrape_lougher,
+        "clifton":   scrape_clifton,
+        "bents":     scrape_bents,
+        "fils":      scrape_fils,
+        "fontaine":  scrape_fontaine,
+        "poligrafa": scrape_poligrafa,
+    }
+    scraper = scrapers[gallery]
     if gallery == "poligrafa":
         return scraper(url, item["title"])
     return scraper(url)
@@ -351,9 +366,17 @@ def _lougher_arrivals(tracked_artists, already):
     return found
 
 
+def _clean_clifton_title(title, artist):
+    for prefix in [artist.title(), artist.upper()]:
+        if title.lower().startswith(prefix.lower()):
+            title = title[len(prefix):].strip()
+    return title.strip(" -–")
+
+
 def _clifton_arrivals(tracked_artists, already):
     found = []
     seen_handles = set()
+    seen_titles = set()
     soup = fetch_soup("https://www.cliftongallery.com/all-artwork")
     if not soup:
         print("DEBUG: could not fetch Clifton listing")
@@ -387,18 +410,21 @@ def _clifton_arrivals(tracked_artists, already):
             continue
 
         title_tag = page_soup.find("h1")
-        if title_tag:
-            title_text = title_tag.get_text(strip=True)
-        else:
-            title_text = handle.replace("-", " ").title()
-
+        title_text = title_tag.get_text(strip=True) if title_tag else handle.replace("-", " ").title()
         title_lower = title_text.lower()
+
+        if title_lower in seen_titles or title_lower in already["titles"]:
+            count += 1
+            continue
+
         for artist in tracked_artists:
             if artist in title_lower:
+                clean_title = _clean_clifton_title(title_text, artist)
                 seen_handles.add(handle)
+                seen_titles.add(title_lower)
                 found.append({
                     "artist":  artist.title(),
-                    "title":   title_text,
+                    "title":   clean_title,
                     "gallery": "Clifton",
                     "url":     full_url,
                 })
@@ -434,27 +460,10 @@ def _bents_arrivals(tracked_artists, already):
             count += 1
             continue
 
-        # Get title from listing page first — fast
-        title_text = a.get_text(strip=True)
-        if not title_text or len(title_text) < 3:
-            parent = a.find_parent("div") or a.find_parent("li") or a.find_parent("article")
-            if parent:
-                heading = parent.find(["h1", "h2", "h3", "h4"])
-                if heading:
-                    title_text = heading.get_text(strip=True)
-                else:
-                    title_text = parent.get_text(strip=True)[:100]
-
-        if not title_text or len(title_text) < 3:
-            count += 1
-            continue
-
-        title_lower = title_text.lower()
-
-        # Check if any tracked artist matches — only then visit individual page
+        url_text = handle.replace("-", " ").lower()
         matched_artist = None
         for artist in tracked_artists:
-            if artist in title_lower:
+            if artist in url_text:
                 matched_artist = artist
                 break
 
@@ -462,7 +471,6 @@ def _bents_arrivals(tracked_artists, already):
             count += 1
             continue
 
-        # Visit individual page only to check sold status and get clean title
         status, page_soup, _ = fetch_page(full_url)
         if status == 404:
             count += 1
@@ -471,10 +479,15 @@ def _bents_arrivals(tracked_artists, already):
             count += 1
             continue
 
+        title_text = handle.replace("-", " ").title()
         if page_soup:
             h1 = page_soup.find("h1")
             if h1:
                 title_text = h1.get_text(strip=True)
+
+        if title_text.lower() in already["titles"]:
+            count += 1
+            continue
 
         seen_handles.add(handle)
         count += 1
@@ -493,14 +506,6 @@ def _bents_arrivals(tracked_artists, already):
 def _fils_arrivals(tracked_artists, already):
     found = []
     seen_handles = set()
-
-    nav_items = {
-        "kunst kaufen", "fotografien", "grafiken", "mappen & sets",
-        "skulpturen & objekte", "unikate & gemälde", "zeitgenössische kunst",
-        "pop art", "neo-expressionismus & neue figuration", "informel",
-        "zero", "op art & konkrete kunst", "klassische kunst", "realismus",
-        "details", "details ansehen"
-    }
 
     for artist in tracked_artists:
         parts = artist.strip().split()
@@ -521,9 +526,14 @@ def _fils_arrivals(tracked_artists, already):
             if not handle or handle in already["handles"] or handle in seen_handles:
                 continue
             title = a.get_text(strip=True)
-            if not title or title.lower() in already["titles"]:
+            if not title or len(title) < 3:
                 continue
-            if title.lower() in nav_items or len(title) < 3:
+            if title.lower() in already["titles"]:
+                continue
+            title_lower = title.lower().strip("»«\"'")
+            if title_lower in FILS_NAV:
+                continue
+            if re.match(r'^(kunst|foto|grafik|skulptur|unikat|zeitgen|pop |neo-|informel|zero|op art|klassisch|realism)', title_lower):
                 continue
             p_status, p_soup, _ = fetch_page(full_url)
             if p_status == 404:
@@ -555,13 +565,15 @@ def _fontaine_arrivals(tracked_artists, already):
         return found
 
     artist_pages = {}
-    for a in soup.select("a[href*='/artists/']"):
+    for a in soup.select("a[href]"):
         href = a.get("href", "")
         text = a.get_text(strip=True).lower()
         if not text or not href or len(text) < 3:
             continue
+        if "/artists/" not in href:
+            continue
         for artist in tracked_artists:
-            if artist == text or (len(artist) > 4 and artist in text):
+            if artist == text or (len(artist) > 5 and artist in text):
                 full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
                 if "/works" not in full_url:
                     full_url = full_url.rstrip("/") + "/works/"
@@ -574,15 +586,17 @@ def _fontaine_arrivals(tracked_artists, already):
         soup = fetch_soup(artist_url)
         if not soup:
             continue
-        for a in soup.select("a[href*='/works/']"):
+        for a in soup.select("a[href]"):
             href = a.get("href", "")
-            if not href:
+            if not href or "/works/" not in href:
                 continue
             full_url = href if href.startswith("http") else "https://www.robertfontainegallery.com" + href
             if full_url.rstrip("/") == artist_url.rstrip("/"):
                 continue
             handle = url_handle(full_url)
-            if not handle or handle in already["handles"] or handle in seen_handles:
+            if not handle or len(handle) < 5:
+                continue
+            if handle in already["handles"] or handle in seen_handles:
                 continue
             title = a.get_text(strip=True)
             if not title or len(title) < 3:
@@ -627,7 +641,6 @@ def _poligrafa_arrivals(tracked_artists, already):
 
     print(f"DEBUG Poligrafa: found pages for {len(artist_pages)} tracked artists")
 
-    # Build decoded inventory titles for comparison
     already_decoded = {html.unescape(t).lower() for t in already["titles"]}
 
     for artist, artist_url in artist_pages.items():
@@ -636,8 +649,6 @@ def _poligrafa_arrivals(tracked_artists, already):
             continue
 
         decoded = html.unescape(raw_text)
-
-        # Extract titles from h1 tags inside figcaption elements
         titles_found = re.findall(r'<figcaption[^>]*>.*?<h1>([^<]+)</h1>', decoded, re.DOTALL)
         if not titles_found:
             titles_found = re.findall(r'<h1>([^<]{3,80})</h1>', decoded)
@@ -647,9 +658,12 @@ def _poligrafa_arrivals(tracked_artists, already):
             if not title_clean or len(title_clean) < 3:
                 continue
             title_lower = title_clean.lower()
-            if title_lower in already_decoded:
-                continue
-            if title_lower in seen_titles:
+            skip = False
+            for inv_title in already_decoded:
+                if inv_title and (inv_title in title_lower or title_lower in inv_title):
+                    skip = True
+                    break
+            if skip or title_lower in seen_titles:
                 continue
             seen_titles.add(title_lower)
             found.append({
