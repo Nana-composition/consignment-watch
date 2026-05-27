@@ -320,10 +320,10 @@ def check_new_arrivals(tracked_artists, consignments):
 def _lougher_arrivals(tracked_artists, already):
     found = []
     seen_handles = set()
-    count = 0
+    new_checked = 0
     base_url = "https://www.loughercontemporary.com/collections/all?filter.v.availability=1&filter.p.vendor=Lougher+Contemporary&sort_by=created-descending"
     page = 1
-    while count < 100:
+    while new_checked < 100:
         url = base_url if page == 1 else f"{base_url}&page={page}"
         soup = fetch_soup(url)
         if not soup:
@@ -332,7 +332,7 @@ def _lougher_arrivals(tracked_artists, already):
         if not links:
             break
         for a in links:
-            if count >= 100:
+            if new_checked >= 100:
                 break
             href = a.get("href", "")
             if not href:
@@ -340,15 +340,19 @@ def _lougher_arrivals(tracked_artists, already):
             full_url = ("https://www.loughercontemporary.com" + href
                         if href.startswith("/") else href)
             handle = url_handle(full_url)
-            if not handle or handle in already["handles"] or handle in seen_handles:
+            if not handle or handle in seen_handles:
                 continue
+            # Skip duplicates but don't count them
+            if handle in already["handles"]:
+                seen_handles.add(handle)
+                continue
+            seen_handles.add(handle)
+            new_checked += 1
             text = a.get_text(strip=True).lower()
             if not text:
                 continue
-            count += 1
             for artist in tracked_artists:
                 if artist in text:
-                    seen_handles.add(handle)
                     found.append({
                         "artist":  artist.title(),
                         "title":   a.get_text(strip=True),
