@@ -130,7 +130,7 @@ def load_consignments():
     ))
     wb = load_workbook(path, data_only=True)
     ws = wb.active
-    headers = [str(c.value).strip() if c.value else "" for c in ws[2]]
+    headers = [str(c.value).strip() if c.value else "" for c in ws[1]]
 
     def col(row, name):
         try:
@@ -139,8 +139,8 @@ def load_consignments():
             return None
 
     items = []
-    for row in ws.iter_rows(min_row=3):
-        consigner_raw = col(row, "Consigner") or ""
+    for row in ws.iter_rows(min_row=2):
+        consigner_raw = col(row, "Consignor") or ""
         gallery_key = None
         for fragment, key in CONSIGNER_MAP.items():
             if fragment in consigner_raw.lower():
@@ -149,15 +149,15 @@ def load_consignments():
         if not gallery_key:
             continue
 
-        source_url = extract_url(col(row, "Internal Comment"))
-        admin_link = col(row, "Admin Link")
-        retail_raw = col(row, "Retail")
-        net_raw    = col(row, "Net Price")
+        source_url = extract_url(col(row, "Internal comment"))
+        admin_link = col(row, "Admin URL")
+        retail_raw = col(row, "Retail price")
+        net_raw    = col(row, "Net price")
         price_col  = PRICE_COLUMN[gallery_key]
         our_price  = parse_price(net_raw if price_col == "net" else retail_raw)
 
         items.append({
-            "id":         col(row, "Inventory Id"),
+            "id":         col(row, "Inv #"),
             "artist":     col(row, "Artist") or "",
             "title":      str(col(row, "Title") or ""),
             "consigner":  consigner_raw,
@@ -265,7 +265,6 @@ def scrape_poligrafa(url, title):
         return None, None
     decoded = html.unescape(raw_text)
     decoded_title = html.unescape(str(title)).lower().strip()
-    # Look for title specifically inside figcaption h1 elements
     artwork_titles = re.findall(r'<figcaption[^>]*>.*?<h1>([^<]+)</h1>', decoded, re.DOTALL)
     if not artwork_titles:
         artwork_titles = re.findall(r'<h1>([^<]{3,80})</h1>', decoded)
@@ -342,7 +341,6 @@ def _lougher_arrivals(tracked_artists, already):
             handle = url_handle(full_url)
             if not handle or handle in seen_handles:
                 continue
-            # Skip duplicates but don't count them
             if handle in already["handles"]:
                 seen_handles.add(handle)
                 continue
